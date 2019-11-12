@@ -15,7 +15,7 @@ and you should use Langohr instead.
 
 ## Reactive
 
-As of HOP 2.1.0, a new reactive, non-blocking IO client based on [Reactor Netty](https://projectreactor.io/) is available. Note
+As of Hop 2.1.0, a new reactive, non-blocking IO client based on [Reactor Netty](https://projectreactor.io/) is available. Note
 the original blocking IO client remains available.
 
 ## Project Maturity
@@ -57,7 +57,7 @@ If you want to use the **blocking IO client**, add the following dependencies:
 <dependency>
   <groupId>com.fasterxml.jackson.core</groupId>
   <artifactId>jackson-databind</artifactId>
-  <version>2.9.9.3</version>
+  <version>2.9.10</version>
 </dependency>
 ```
 
@@ -77,7 +77,7 @@ If you want to use the **reactive, non-blocking IO client**, add the following d
 <dependency>
   <groupId>com.fasterxml.jackson.core</groupId>
   <artifactId>jackson-databind</artifactId>
-  <version>2.9.9.3</version>
+  <version>2.9.10</version>
 </dependency>
 ```
 
@@ -89,7 +89,7 @@ If you want to use the **blocking IO client**, add the following dependencies:
 compile "com.rabbitmq:http-client:3.4.0.RELEASE"
 compile "org.springframework:spring-web:5.1.9.RELEASE"
 compile "org.apache.httpcomponents:httpclient:4.5.9"
-compile "com.fasterxml.jackson.core:jackson-databind:2.9.9.3"
+compile "com.fasterxml.jackson.core:jackson-databind:2.9.10"
 ```
 
 If you want to use the **reactive, non-blocking IO client**, add the following dependencies:
@@ -97,7 +97,7 @@ If you want to use the **reactive, non-blocking IO client**, add the following d
 ```groovy
 compile "com.rabbitmq:http-client:3.4.0.RELEASE"
 compile "io.projectreactor.netty:reactor-netty:0.8.11.RELEASE"
-compile "com.fasterxml.jackson.core:jackson-databind:2.9.9.3"
+compile "com.fasterxml.jackson.core:jackson-databind:2.9.10"
 ```
 
 ## Usage Guide
@@ -217,11 +217,40 @@ c.getBindingsByDestination("/", "an.exchange");
 
 ## Running Tests
 
-    gradle check
+To run the suite against a specific RabbitMQ node, export `HOP_RABBITMQCTL` and `HOP_RABBITMQ_PLUGINS` to point at `rabbitmqctl` and `rabbitmq-plugins` from the installation.
+
+Then set up the node that is assumed to be running:
+
+``` sh
+./bin/before_build.sh
+```
+
+This will enable several plugins used by the test suite and configure the node
+to use a much shorter event refresh interval so that HTTP API reflects system state
+changes with less of a delay.
+
+To run the tests:
+
+``` sh
+./gradlew check
+```
 
 The test suite assumes RabbitMQ is running locally with
-stock settings and rabbitmq-management plugin enabled.
+stock settings and a few plugins are enabled:
 
+ * `rabbitmq_management` (listening on port 15672)
+ * `rabbitmq_shovel_management`
+ * `rabbitmq_federation_management`  
+
+To run the suite against a specific RabbitMQ node, export `HOP_RABBITMQCTL` and `HOP_RABBITMQ_PLUGINS`
+to point at `rabbitmqctl` and `rabbitmq-plugins` from the installation.
+
+The test suite can use a different port than 15672 by specifying it with the
+`rabbitmq.management.port` system property:
+
+``` sh
+./gradlew check -Drabbitmq.management.port=15673
+```
 
 ## License
 

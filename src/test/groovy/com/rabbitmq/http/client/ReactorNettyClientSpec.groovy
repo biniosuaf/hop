@@ -52,6 +52,7 @@ import io.netty.buffer.ByteBuf
 import io.netty.buffer.ByteBufOutputStream
 import reactor.core.publisher.Flux
 import reactor.core.publisher.Mono
+import reactor.netty.http.client.HttpClient
 import spock.lang.IgnoreIf
 import spock.lang.Specification
 
@@ -92,8 +93,14 @@ class ReactorNettyClientSpec extends Specification {
 
     protected static ReactorNettyClient newLocalhostNodeClient(ReactorNettyClientOptions options) {
         new ReactorNettyClient(
-                String.format("http://%s:%s@127.0.0.1:15672/api", DEFAULT_USERNAME, DEFAULT_PASSWORD), options
+                String.format("http://%s:%s@127.0.0.1:%d/api", DEFAULT_USERNAME, DEFAULT_PASSWORD, managementPort()), options
         )
+    }
+
+    static int managementPort() {
+        return System.getProperty("rabbitmq.management.port") == null ?
+                15672 :
+                Integer.valueOf(System.getProperty("rabbitmq.management.port"))
     }
 
     def "GET /api/overview"() {
@@ -139,6 +146,29 @@ class ReactorNettyClientSpec extends Specification {
         if (conn.isOpen()) {
             conn.close()
         }
+    }
+
+    def "user info decoding"() {
+        when: "username and password are encoded in the URL"
+        def authorization = new AtomicReference<String>()
+        def httpClient = HttpClient.create().baseUrl("http://localhost:" + managementPort() + "/api/")
+                .doAfterRequest({request, connection ->
+                    authorization.set(request.requestHeaders().get("authorization"))
+                })
+
+        def localClient = new ReactorNettyClient(
+                "http://test+user:test%40password@localhost:" + managementPort() +  "/api/",
+                new ReactorNettyClientOptions().client({ httpClient }))
+
+        try {
+            localClient.getOverview().block()
+        } catch (Exception e) {
+            // OK
+        }
+
+        then: "username and password are decoded before going into the request"
+        // the authorization header is the same as with the decoded credentials
+        authorization.get() == ReactorNettyClient.basicAuthentication("test user", "test@password")
     }
 
     def "GET /api/nodes"() {
@@ -408,6 +438,7 @@ class ReactorNettyClientSpec extends Specification {
         if (!isVersion38orLater()) return
         when: "client creates a vhost with metadata"
         final vhost = "vhost-with-metadata"
+        client.deleteVhost(vhost).block()
         client.createVhost(vhost, true, "vhost description", "production", "application1", "realm1").block()
 
         final vhi = client.getVhost(vhost).block()
@@ -421,7 +452,7 @@ class ReactorNettyClientSpec extends Specification {
 
         cleanup:
         if (isVersion38orLater()) {
-            client.deleteVhost(vhost)
+            client.deleteVhost(vhost).block()
         }
     }
 
@@ -1677,7 +1708,7 @@ class ReactorNettyClientSpec extends Specification {
     }
 
     def "GET /api/parameters/shovel"() {
-        given: "a basic topology"
+        given: "a shovel defined"
         ShovelDetails value = new ShovelDetails("amqp://localhost:5672/vh1", "amqp://localhost:5672/vh2", 30, true, null);
         value.setSourceQueue("queue1")
         value.setDestinationExchange("exchange1")
@@ -1688,16 +1719,52 @@ class ReactorNettyClientSpec extends Specification {
         when: "client requests the shovels"
         final shovels = awaitEventPropagation { client.getShovels() }
 
-        then: "broker definitions are returned"
+        then: "shovel definitions are returned"
         shovels.hasElements().block()
         ShovelInfo s = shovels.filter( { s -> s.name.equals("shovel1") } ).blockFirst()
         s != null
         s.name.equals("shovel1")
         s.virtualHost.equals("/")
-        s.details.sourceURI.equals("amqp://localhost:5672/vh1")
+        s.details.sourceURIs.equals(["amqp://localhost:5672/vh1"])
         s.details.sourceExchange == null
         s.details.sourceQueue.equals("queue1")
-        s.details.destinationURI.equals("amqp://localhost:5672/vh2")
+        s.details.destinationURIs.equals(["amqp://localhost:5672/vh2"])
+        s.details.destinationExchange.equals("exchange1")
+        s.details.destinationQueue == null
+        s.details.reconnectDelay == 30
+        s.details.addForwardHeaders
+        s.details.publishProperties == null
+        s.details.sourcePrefetchCount == 50L
+        s.details.sourceDeleteAfter == "never"
+        s.details.destinationAddTimestampHeader
+
+        cleanup:
+        client.deleteShovel("/","shovel1").block()
+        client.deleteQueue("/", "queue1").block()
+    }
+
+    def "GET /api/parameters/shovel with multiple URIs"() {
+        given: "a shovel defined with multiple URIs"
+        ShovelDetails value = new ShovelDetails(["amqp://localhost:5672/vh1", "amqp://localhost:5672/vh3"], ["amqp://localhost:5672/vh2", "amqp://localhost:5672/vh4"], 30, true, null);
+        value.setSourceQueue("queue1")
+        value.setDestinationExchange("exchange1")
+        value.setSourcePrefetchCount(50L)
+        value.setSourceDeleteAfter("never")
+        value.setDestinationAddTimestampHeader(true)
+        client.declareShovel("/", new ShovelInfo("shovel1", value)).block()
+        when: "client requests the shovels"
+        final shovels = awaitEventPropagation { client.getShovels() }
+
+        then: "shovel definitions are returned"
+        shovels.hasElements().block()
+        ShovelInfo s = shovels.filter( { s -> s.name.equals("shovel1") } ).blockFirst()
+        s != null
+        s.name.equals("shovel1")
+        s.virtualHost.equals("/")
+        s.details.sourceURIs.equals(["amqp://localhost:5672/vh1", "amqp://localhost:5672/vh3"])
+        s.details.sourceExchange == null
+        s.details.sourceQueue.equals("queue1")
+        s.details.destinationURIs.equals(["amqp://localhost:5672/vh2", "amqp://localhost:5672/vh4"])
         s.details.destinationExchange.equals("exchange1")
         s.details.destinationQueue == null
         s.details.reconnectDelay == 30

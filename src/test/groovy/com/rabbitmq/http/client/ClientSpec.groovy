@@ -19,6 +19,10 @@ package com.rabbitmq.http.client
 import com.rabbitmq.client.*
 import com.rabbitmq.http.client.domain.*
 import groovy.json.JsonSlurper
+import org.apache.http.HttpRequestInterceptor
+import org.apache.http.auth.AuthScope
+import org.apache.http.client.protocol.HttpClientContext
+import org.apache.http.protocol.HttpContext
 import org.springframework.http.HttpMethod
 import org.springframework.http.HttpStatus
 import org.springframework.http.client.ClientHttpRequest
@@ -62,11 +66,17 @@ class ClientSpec extends Specification {
   }
 
   protected static Client newLocalhostNodeClient() {
-    new Client("http://127.0.0.1:15672/api/", DEFAULT_USERNAME, DEFAULT_PASSWORD)
+    new Client("http://127.0.0.1:" + managementPort() + "/api/", DEFAULT_USERNAME, DEFAULT_PASSWORD)
   }
 
   protected static Client newLocalhostNodeClient(HttpClientBuilderConfigurator cfg) {
-    new Client("http://127.0.0.1:15672/api/", DEFAULT_USERNAME, DEFAULT_PASSWORD, cfg)
+    new Client("http://127.0.0.1:" + managementPort() + "/api/", DEFAULT_USERNAME, DEFAULT_PASSWORD, cfg)
+  }
+
+  static int managementPort() {
+    return System.getProperty("rabbitmq.management.port") == null ?
+            15672 :
+            Integer.valueOf(System.getProperty("rabbitmq.management.port"))
   }
 
   def "GET /api/overview"() {
@@ -114,6 +124,32 @@ class ClientSpec extends Specification {
     }
   }
 
+  def "user info decoding"() {
+    when: "username and password are encoded in the URL"
+    def usernamePassword = new AtomicReference<>()
+    def localClient = new Client("http://test+user:test%40password@localhost:" + managementPort() + "/api/", { builder ->
+      builder.addInterceptorLast(new HttpRequestInterceptor() {
+        @Override
+        void process(org.apache.http.HttpRequest request, HttpContext context) throws org.apache.http.HttpException, IOException {
+          HttpClientContext httpCtx = (HttpContext) context
+          def credentials = httpCtx.getCredentialsProvider().getCredentials(new AuthScope(AuthScope.ANY_HOST, AuthScope.ANY_PORT))
+          usernamePassword.set(credentials.getUserPrincipal().name + ":" + credentials.getPassword())
+        }
+      })
+      return builder
+    }
+    )
+
+    try {
+      localClient.getOverview()
+    } catch (Exception e) {
+      // OK
+    }
+
+    then: "username and password are decoded before going into the request"
+    usernamePassword.get() == "test user:test@password"
+  }
+
   def "GET /api/nodes"() {
     when: "client retrieves a list of cluster nodes"
     final res = client.getNodes()
@@ -142,7 +178,7 @@ class ClientSpec extends Specification {
 
   def "GET /api/nodes with credentials in the URL"() {
     when: "credentials are provided in the URL"
-    final client = new Client("http://guest:guest@127.0.0.1:15672/api/")
+    final client = new Client("http://guest:guest@127.0.0.1:" + managementPort() + "/api/")
 
     and: "retrieves a list of cluster nodes"
     final res = client.getNodes()
@@ -1065,6 +1101,7 @@ class ClientSpec extends Specification {
     if (!isVersion38orLater()) return
     when: "client creates a vhost with metadata"
     final vhost = "vhost-with-metadata"
+    client.deleteVhost(vhost)
     client.createVhost(vhost, true, "vhost description", "production", "application1", "realm1")
     final vhi = client.getVhost(vhost)
 
@@ -1758,7 +1795,7 @@ class ClientSpec extends Specification {
   }
 
   def "GET /api/parameters/shovel"() {
-    given: "a basic topology"
+    given: "a shovel defined"
     ShovelDetails value = new ShovelDetails("amqp://localhost:5672/vh1", "amqp://localhost:5672/vh2", 30, true, null)
     value.setSourceQueue("queue1")
     value.setDestinationExchange("exchange1")
@@ -1769,17 +1806,17 @@ class ClientSpec extends Specification {
     when: "client requests the shovels"
     final shovels = awaitEventPropagation { client.getShovels() }
 
-    then: "broker definitions are returned"
+    then: "shovel definitions are returned"
     !shovels.isEmpty()
     shovels.size() >= 1
     ShovelInfo s = shovels.find { (it.name == "shovel1") } as ShovelInfo
     s != null
     s.name == "shovel1"
     s.virtualHost == "/"
-    s.details.sourceURI == "amqp://localhost:5672/vh1"
+    s.details.sourceURIs.equals(["amqp://localhost:5672/vh1"])
     s.details.sourceExchange == null
     s.details.sourceQueue == "queue1"
-    s.details.destinationURI == "amqp://localhost:5672/vh2"
+    s.details.destinationURIs.equals(["amqp://localhost:5672/vh2"])
     s.details.destinationExchange == "exchange1"
     s.details.destinationQueue == null
     s.details.reconnectDelay == 30
@@ -1791,6 +1828,43 @@ class ClientSpec extends Specification {
 
     cleanup:
     client.deleteShovel("/","shovel1")
+    client.deleteQueue("/", "queue1")
+  }
+
+  def "GET /api/parameters/shovel with multiple URIs"() {
+    given: "a shovel defined with multiple URIs"
+    ShovelDetails value = new ShovelDetails(["amqp://localhost:5672/vh1", "amqp://localhost:5672/vh3"], ["amqp://localhost:5672/vh2", "amqp://localhost:5672/vh4"], 30, true, null)
+    value.setSourceQueue("queue1")
+    value.setDestinationExchange("exchange1")
+    value.setSourcePrefetchCount(50L)
+    value.setSourceDeleteAfter("never")
+    value.setDestinationAddTimestampHeader(true)
+    client.declareShovel("/", new ShovelInfo("shovel2", value))
+    when: "client requests the shovels"
+    final shovels = awaitEventPropagation { client.getShovels() }
+
+    then: "shovel definitions are returned"
+    !shovels.isEmpty()
+    shovels.size() >= 1
+    ShovelInfo s = shovels.find { (it.name == "shovel2") } as ShovelInfo
+    s != null
+    s.name == "shovel2"
+    s.virtualHost == "/"
+    s.details.sourceURIs.equals(["amqp://localhost:5672/vh1", "amqp://localhost:5672/vh3"])
+    s.details.sourceExchange == null
+    s.details.sourceQueue == "queue1"
+    s.details.destinationURIs.equals(["amqp://localhost:5672/vh2", "amqp://localhost:5672/vh4"])
+    s.details.destinationExchange == "exchange1"
+    s.details.destinationQueue == null
+    s.details.reconnectDelay == 30
+    s.details.addForwardHeaders
+    s.details.publishProperties == null
+    s.details.sourcePrefetchCount == 50L
+    s.details.sourceDeleteAfter == "never"
+    s.details.destinationAddTimestampHeader
+
+    cleanup:
+    client.deleteShovel("/","shovel2")
     client.deleteQueue("/", "queue1")
   }
 
